@@ -31,6 +31,7 @@
       "128": "icons/icon.png"
     }
   },
+  "incognito": "not_allowed",
   "content_scripts": [
     {
       "matches": [

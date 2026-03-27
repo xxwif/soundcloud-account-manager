@@ -2,7 +2,11 @@ const API = typeof browser !== "undefined" ? browser : chrome;
 const STORAGE_KEY = "scam_accounts_v1";
 const SC_URL = "https://soundcloud.com";
 
-API.action.disable();
+if (API.action) {
+  API.action.disable();
+} else if (API.browserAction) {
+  API.browserAction.disable();
+}
 
 async function getAccounts() {
   const data = await API.storage.local.get(STORAGE_KEY);

@@ -218,6 +218,8 @@ function buildMenuItem(prototype, label, onClick) {
   return item;
 }
 
+const isIncognito = API.extension?.inIncognitoContext || false;
+
 async function addAccountFromMenu() {
   await API.runtime.sendMessage({ type: "OPEN_LOGIN_TAB" });
 }
@@ -302,7 +304,7 @@ async function injectAccountMenu() {
 
     const itemsParent = findItemsParent(container);
 
-    const accountsResult = await API.runtime.sendMessage({ type: "GET_ACCOUNTS" });
+    const accountsResult = await API.runtime.sendMessage({ type: "GET_ACCOUNTS", incognito: isIncognito });
     const accounts = Array.isArray(accountsResult?.accounts) ? accountsResult.accounts : [];
 
     const addItem = buildMenuItem(prototype, "Add Account", () => {

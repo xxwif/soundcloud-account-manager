@@ -113,7 +113,8 @@ async function sendMessageToTab(tabId, message) {
 async function createOrUpdateAccount(profile) {
   const accounts = await getAccounts();
   const now = Date.now();
-  const existingIndex = accounts.findIndex((a) => a.username === profile.username);
+  const incognito = profile.incognito || false;
+  const existingIndex = accounts.findIndex((a) => a.username === profile.username && !!a.incognito === !!incognito);
   const account = {
     id: profile.id || `${profile.username}-${now}`,
     username: profile.username,
@@ -122,6 +123,7 @@ async function createOrUpdateAccount(profile) {
     avatarUrl: profile.avatarUrl || "",
     cookies: profile.cookies || [],
     localStorageSnapshot: profile.localStorageSnapshot || {},
+    incognito: profile.incognito || false,
     updatedAt: now
   };
 
@@ -156,7 +158,8 @@ API.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     const profile = await sendMessageToTab(tabId, { type: "EXTRACT_SC_PROFILE" });
     if (!profile?.ok || !profile.username) return;
     const newCookies = await readSoundCloudCookies();
-    await createOrUpdateAccount({ ...profile, cookies: newCookies });
+    const tabIncognito = tab.incognito || false;
+    await createOrUpdateAccount({ ...profile, cookies: newCookies, incognito: tabIncognito });
   })().catch(() => {});
 });
 
@@ -164,7 +167,9 @@ API.runtime.onMessage.addListener((message, sender, sendResponse) => {
   (async () => {
     if (message?.type === "GET_ACCOUNTS") {
       const accounts = await getAccounts();
-      sendResponse({ ok: true, accounts });
+      const incognito = message.incognito || sender?.tab?.incognito || false;
+      const filtered = accounts.filter((a) => !!a.incognito === !!incognito);
+      sendResponse({ ok: true, accounts: filtered });
       return;
     }
 
@@ -175,12 +180,13 @@ API.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
 
+      const tabIncognito = callerTab.incognito || false;
       const originalCookies = await readSoundCloudCookies();
       const currentProfile = await sendMessageToTab(callerTab.id, {
         type: "EXTRACT_SC_PROFILE"
       });
       if (currentProfile?.ok && currentProfile.username) {
-        await createOrUpdateAccount({ ...currentProfile, cookies: originalCookies });
+        await createOrUpdateAccount({ ...currentProfile, cookies: originalCookies, incognito: tabIncognito });
       }
 
       await clearSoundCloudCookies();

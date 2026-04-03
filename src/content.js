@@ -117,8 +117,9 @@ function isVisible(el) {
 function findAllMenuCandidates() {
   return Array.from(document.querySelectorAll("ul, nav, div, section")).filter((el) => {
     if (el.hasAttribute(INJECTED_ATTR)) return false;
-    const text = norm(el.textContent);
-    return text.includes("profile") && text.includes("likes") && (text.includes("sign out") || text.includes("log out") || text.includes("distribute"));
+    const links = Array.from(el.querySelectorAll("a, button"));
+    const labels = links.map((l) => norm(l.textContent));
+    return labels.some((t) => t === "profile") && labels.some((t) => t === "likes");
   });
 }
 

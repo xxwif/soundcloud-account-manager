@@ -120,9 +120,7 @@ function findAllMenuCandidates() {
   return Array.from(document.querySelectorAll("ul, nav, div, section")).filter((el) => {
     if (el.hasAttribute(INJECTED_ATTR)) return false;
     const text = norm(el.textContent);
-    const hasSignOut = text.includes("sign out") || text.includes("log out");
-    const hasProfileIndicators = text.includes("profile") && text.includes("likes");
-    return hasSignOut && hasProfileIndicators;
+    return text.includes("profile") && text.includes("likes") && (text.includes("sign out") || text.includes("log out") || text.includes("distribute"));
   });
 }
 

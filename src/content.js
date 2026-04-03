@@ -30,13 +30,11 @@ function pickImage(selectors) {
 
 const SC_RESERVED_PATHS = new Set([
   "discover", "stream", "upload", "you", "feed", "charts", "search",
-  "signin", "login", "logout", "signup", "register", "forgot",
-  "password", "settings", "messages", "notifications", "stations",
-  "collection", "library", "history", "likes", "playlists", "sets",
-  "following", "followers", "popular", "trending", "people",
-  "pages", "legal", "imprint", "terms-of-use",
-  "community-guidelines", "privacy", "cookies", "creator-guide",
-  "for-artists", "go", "pro", "checkout", "premium",
+  "signin", "login", "logout", "signup", "forgot", "password",
+  "settings", "messages", "notifications", "stations",
+  "collection", "library", "history", "likes", "playlists",
+  "popular", "trending", "people", "pages",
+  "legal", "privacy", "pro", "premium",
   "soundcloud-scenes", "hear-the-next", "blog",
 ]);
 

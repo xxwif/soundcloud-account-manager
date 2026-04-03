@@ -156,11 +156,16 @@ API.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   pendingLogins.delete(tabId);
 
   (async () => {
-    await new Promise((r) => setTimeout(r, 800));
-    const profile = await sendMessageToTab(tabId, { type: "EXTRACT_SC_PROFILE" });
-    if (!profile?.ok || !profile.username) return;
-    const newCookies = await readSoundCloudCookies();
-    await createOrUpdateAccount({ ...profile, cookies: newCookies });
+    const delays = [2000, 3000, 5000];
+    for (const delay of delays) {
+      await new Promise((r) => setTimeout(r, delay));
+      const profile = await sendMessageToTab(tabId, { type: "EXTRACT_SC_PROFILE" });
+      if (profile?.ok && profile.username) {
+        const newCookies = await readSoundCloudCookies();
+        await createOrUpdateAccount({ ...profile, cookies: newCookies });
+        return;
+      }
+    }
   })().catch(() => {});
 });
 

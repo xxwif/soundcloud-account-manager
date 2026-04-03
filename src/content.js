@@ -28,25 +28,28 @@ function pickImage(selectors) {
   return "";
 }
 
+const SC_RESERVED_PATHS = new Set([
+  "discover", "stream", "upload", "you", "feed", "charts", "search",
+  "signin", "login", "logout", "signup", "register", "forgot",
+  "password", "settings", "messages", "notifications", "stations",
+  "collection", "library", "history", "likes", "playlists", "sets",
+  "following", "followers", "popular", "trending", "people",
+  "pages", "legal", "imprint", "terms-of-use",
+  "community-guidelines", "privacy", "cookies", "creator-guide",
+  "for-artists", "go", "pro", "checkout", "premium",
+  "soundcloud-scenes", "hear-the-next", "blog",
+]);
+
 function getUsernameFromProfileUrl(profileUrl) {
   if (!profileUrl) return "";
   try {
     const url = new URL(profileUrl, location.origin);
     const segment = url.pathname.split("/").filter(Boolean)[0];
-    return segment || "";
+    if (!segment || SC_RESERVED_PATHS.has(segment.toLowerCase())) return "";
+    return segment;
   } catch {
     return "";
   }
-}
-
-function readOpenGraphProfile() {
-  const profileUrl =
-    document.querySelector('meta[property="og:url"]')?.content ||
-    document.querySelector('link[rel="canonical"]')?.href ||
-    "";
-  const displayName =
-    document.querySelector('meta[property="og:title"]')?.content?.replace(" | Listen online", "") || "";
-  return { profileUrl, displayName };
 }
 
 function readLocalStorageSnapshot() {
@@ -67,20 +70,17 @@ function applyLocalStorageSnapshot(snapshot) {
 }
 
 function extractProfile() {
-  const dropdownLink = pickHref([
+  const profileUrl = pickHref([
     'a[aria-label*="Profile"]',
     '[class*="user"] a[href^="/"]',
     "header a[href^='/']"
   ]);
-  const og = readOpenGraphProfile();
-  const profileUrl = dropdownLink || og.profileUrl;
 
-  const displayName =
-    pickText([
-      '[aria-label*="Account"]',
-      '[class*="user"] [class*="name"]',
-      "header [class*='profile']"
-    ]) || og.displayName;
+  const displayName = pickText([
+    '[aria-label*="Account"]',
+    '[class*="user"] [class*="name"]',
+    "header [class*='profile']"
+  ]);
 
   const username = getUsernameFromProfileUrl(profileUrl);
   const avatarUrl = pickImage([
@@ -120,7 +120,9 @@ function findAllMenuCandidates() {
   return Array.from(document.querySelectorAll("ul, nav, div, section")).filter((el) => {
     if (el.hasAttribute(INJECTED_ATTR)) return false;
     const text = norm(el.textContent);
-    return text.includes("profile") && text.includes("likes") && text.includes("distribute");
+    const hasSignOut = text.includes("sign out") || text.includes("log out");
+    const hasProfileIndicators = text.includes("profile") && text.includes("likes");
+    return hasSignOut && hasProfileIndicators;
   });
 }
 

@@ -116,7 +116,7 @@ function isVisible(el) {
 
 function findAllMenuCandidates() {
   return Array.from(document.querySelectorAll("ul, nav, div, section")).filter((el) => {
-    if (el.hasAttribute(INJECTED_ATTR)) return false;
+    if (el.hasAttribute(INJECTED_ATTR) && el.querySelector("[data-scam-item]")) return false;
     const links = Array.from(el.querySelectorAll("a, button"));
     const labels = links.map((l) => norm(l.textContent));
     return labels.some((t) => t === "profile") && labels.some((t) => t === "likes");

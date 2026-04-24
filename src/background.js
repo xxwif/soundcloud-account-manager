@@ -27,13 +27,14 @@ async function readSoundCloudCookies() {
     secure: cookie.secure,
     httpOnly: cookie.httpOnly,
     sameSite: cookie.sameSite,
-    expirationDate: cookie.expirationDate
+    expirationDate: cookie.expirationDate,
+    firstPartyDomain: cookie.firstPartyDomain
   }));
 }
 
 async function clearSoundCloudCookies() {
   const cookies = await API.cookies.getAll({ domain: "soundcloud.com" });
-  await Promise.all(
+  await Promise.allSettled(
     cookies.map((cookie) => {
       const host = cookie.domain.startsWith(".")
         ? cookie.domain.slice(1)
@@ -48,22 +49,19 @@ async function clearSoundCloudCookies() {
   );
 }
 
-function toChromeCookieSameSite(sameSite) {
-  if (!sameSite) {
-    return "no_restriction";
-  }
+function normalizeSameSite(sameSite, secure) {
+  if (!sameSite) return null;
   const normalized = String(sameSite).toLowerCase();
-  if (normalized.includes("strict")) {
-    return "strict";
+  if (normalized.includes("strict")) return "strict";
+  if (normalized.includes("lax")) return "lax";
+  if (normalized.includes("none") || normalized.includes("no_restriction")) {
+    return secure ? "no_restriction" : null;
   }
-  if (normalized.includes("lax")) {
-    return "lax";
-  }
-  return "no_restriction";
+  return null;
 }
 
 async function applySoundCloudCookies(cookies) {
-  await Promise.all(
+  await Promise.allSettled(
     cookies.map((cookie) => {
       const host = cookie.domain.startsWith(".")
         ? cookie.domain.slice(1)
@@ -86,11 +84,12 @@ async function applySoundCloudCookies(cookies) {
         details.expirationDate = cookie.expirationDate;
       }
 
-      if (typeof chrome !== "undefined") {
-        details.sameSite = toChromeCookieSameSite(cookie.sameSite);
-      } else if (cookie.sameSite) {
-        details.sameSite = cookie.sameSite;
+      if (cookie.firstPartyDomain) {
+        details.firstPartyDomain = cookie.firstPartyDomain;
       }
+
+      const sameSite = normalizeSameSite(cookie.sameSite, cookie.secure);
+      if (sameSite) details.sameSite = sameSite;
 
       return API.cookies.set(details);
     })
@@ -232,7 +231,7 @@ API.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (message?.type === "SWITCH_ACCOUNT") {
       const accounts = await getAccounts();
       const account = accounts.find((a) => a.id === message.accountId);
-      const tab = await withActiveSoundCloudTab();
+      const tab = sender?.tab || (await withActiveSoundCloudTab());
 
       if (!account) {
         sendResponse({ ok: false, error: "account not found." });
@@ -249,8 +248,8 @@ API.runtime.onMessage.addListener((message, sender, sendResponse) => {
         type: "APPLY_LOCAL_STORAGE",
         localStorageSnapshot: account.localStorageSnapshot || {}
       });
-      await API.tabs.reload(tab.id);
       sendResponse({ ok: true });
+      API.tabs.reload(tab.id).catch(() => {});
       return;
     }
 

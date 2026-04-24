@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "SoundCloud Account Manager",
   "description": "Save and switch between multiple SoundCloud accounts.",
-  "version": "0.1.1",
+  "version": "0.1.4",
   "homepage_url": "https://github.com/xxwif/soundcloud-account-manager",
   "permissions": [
     "storage",

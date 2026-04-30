@@ -1,5 +1,6 @@
 const API = typeof browser !== "undefined" ? browser : chrome;
 const STORAGE_KEY = "scam_accounts_v1";
+const PENDING_VERIFY_KEY = "scam_pending_verify";
 const SC_URL = "https://soundcloud.com";
 
 if (API.action) {
@@ -94,6 +95,27 @@ async function applySoundCloudCookies(cookies) {
       return API.cookies.set(details);
     })
   );
+}
+
+async function getPendingVerify() {
+  const data = await API.storage.local.get(PENDING_VERIFY_KEY);
+  return data[PENDING_VERIFY_KEY] || null;
+}
+
+async function setPendingVerify(payload) {
+  await API.storage.local.set({ [PENDING_VERIFY_KEY]: payload });
+}
+
+async function rollbackSwitch(tab, fallback) {
+  await clearSoundCloudCookies();
+  await applySoundCloudCookies(fallback?.cookies || []);
+  if (tab?.id) {
+    await sendMessageToTab(tab.id, {
+      type: "APPLY_LOCAL_STORAGE",
+      localStorageSnapshot: fallback?.localStorageSnapshot || {}
+    });
+    await API.tabs.reload(tab.id).catch(() => {});
+  }
 }
 
 async function withActiveSoundCloudTab() {
@@ -242,6 +264,23 @@ API.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
 
+      const fallbackCookies = await readSoundCloudCookies();
+      const currentProfile = await sendMessageToTab(tab.id, { type: "EXTRACT_SC_PROFILE" });
+      const fallback = {
+        cookies: fallbackCookies,
+        localStorageSnapshot: currentProfile?.localStorageSnapshot || {}
+      };
+      if (currentProfile?.ok && currentProfile.username) {
+        await createOrUpdateAccount({ ...currentProfile, cookies: fallbackCookies });
+      }
+
+      await setPendingVerify({
+        tabId: tab.id,
+        expectedUsername: account.username,
+        fallback,
+        timestamp: Date.now()
+      });
+
       await clearSoundCloudCookies();
       await applySoundCloudCookies(account.cookies || []);
       await sendMessageToTab(tab.id, {
@@ -250,6 +289,37 @@ API.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
       sendResponse({ ok: true });
       API.tabs.reload(tab.id).catch(() => {});
+      return;
+    }
+
+    if (message?.type === "GET_VERIFY_PENDING") {
+      const verify = await getPendingVerify();
+      if (!verify || verify.tabId !== sender?.tab?.id) {
+        sendResponse({ pending: false });
+        return;
+      }
+      if (Date.now() - verify.timestamp > 30 * 1000) {
+        await API.storage.local.remove(PENDING_VERIFY_KEY);
+        sendResponse({ pending: false });
+        return;
+      }
+      sendResponse({ pending: true, expectedUsername: verify.expectedUsername });
+      return;
+    }
+
+    if (message?.type === "VERIFY_RESULT") {
+      const verify = await getPendingVerify();
+      if (!verify || verify.tabId !== sender?.tab?.id) {
+        sendResponse({ ok: false });
+        return;
+      }
+      await API.storage.local.remove(PENDING_VERIFY_KEY);
+      if (message.success) {
+        sendResponse({ ok: true });
+        return;
+      }
+      await rollbackSwitch(sender.tab, verify.fallback);
+      sendResponse({ ok: true });
       return;
     }
 

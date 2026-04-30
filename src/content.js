@@ -118,8 +118,12 @@ function findAllMenuCandidates() {
   return Array.from(document.querySelectorAll("ul, nav, div, section")).filter((el) => {
     if (el.hasAttribute(INJECTED_ATTR) && el.querySelector("[data-scam-item]")) return false;
     const links = Array.from(el.querySelectorAll("a, button"));
+    if (links.length > 15) return false;
     const labels = links.map((l) => norm(l.textContent));
-    return labels.some((t) => t === "profile") && labels.some((t) => t === "likes");
+    const hasProfile = labels.some((t) => t === "profile");
+    const hasLikes = labels.some((t) => t === "likes");
+    const hasSignOut = labels.some((t) => t === "sign out" || t === "log out" || t === "logout");
+    return hasProfile && hasLikes && hasSignOut;
   });
 }
 
@@ -334,6 +338,28 @@ function scheduleInject() {
 const observer = new MutationObserver(scheduleInject);
 observer.observe(document.documentElement, { subtree: true, childList: true });
 scheduleInject();
+
+async function checkPendingVerify() {
+  const status = await API.runtime.sendMessage({ type: "GET_VERIFY_PENDING" });
+  if (!status?.pending) return;
+
+  let success = false;
+  const delays = [2000, 3000, 5000];
+  for (const delay of delays) {
+    await new Promise((r) => setTimeout(r, delay));
+    const path = location.pathname || "";
+    if (path.startsWith("/signin") || path.startsWith("/login")) break;
+    const profile = extractProfile();
+    if (profile?.ok && profile.username === status.expectedUsername) {
+      success = true;
+      break;
+    }
+  }
+
+  await API.runtime.sendMessage({ type: "VERIFY_RESULT", success });
+}
+
+checkPendingVerify().catch(() => {});
 
 API.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === "EXTRACT_SC_PROFILE") {

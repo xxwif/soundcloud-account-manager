@@ -122,8 +122,8 @@ function findAllMenuCandidates() {
     const labels = links.map((l) => norm(l.textContent));
     const hasProfile = labels.some((t) => t === "profile");
     const hasLikes = labels.some((t) => t === "likes");
-    const hasSignOut = labels.some((t) => t === "sign out" || t === "log out" || t === "logout");
-    return hasProfile && hasLikes && hasSignOut;
+    const hasYouLink = links.some((l) => (l.getAttribute("href") || "").startsWith("/you/"));
+    return hasProfile && hasLikes && hasYouLink;
   });
 }
 

@@ -1,4 +1,6 @@
 const API = typeof browser !== "undefined" ? browser : chrome;
+// Firefox exposes runtime.getBrowserInfo; Chrome doesn't.
+const IS_FIREFOX = typeof API.runtime?.getBrowserInfo === "function";
 const STORAGE_KEY = "scam_accounts_v1";
 const PENDING_VERIFY_KEY = "scam_pending_verify";
 const SC_URL = "https://soundcloud.com";
@@ -18,52 +20,124 @@ async function setAccounts(accounts) {
   await API.storage.local.set({ [STORAGE_KEY]: accounts });
 }
 
-async function readSoundCloudCookies() {
-  const cookies = await API.cookies.getAll({ domain: "soundcloud.com" });
-  return cookies.map((cookie) => ({
-    name: cookie.name,
-    value: cookie.value,
-    domain: cookie.domain,
-    path: cookie.path,
-    secure: cookie.secure,
-    httpOnly: cookie.httpOnly,
-    sameSite: cookie.sameSite,
-    expirationDate: cookie.expirationDate,
-    firstPartyDomain: cookie.firstPartyDomain
-  }));
+// Cookies that belong to the browser, not to a SoundCloud account. They are
+// never cleared or restored when switching:
+//  - datadome: SoundCloud's bot protection. An old copy from another session
+//    can trigger captchas or block sign-in.
+//  - consent/theme: otherwise the cookie banner reappears on every switch.
+const DEVICE_COOKIE_NAMES = new Set([
+  "datadome",
+  "OptanonConsent",
+  "OptanonAlertBoxClosed",
+  "cookie_consent",
+  "sc_theme"
+]);
+
+function isDeviceCookie(cookie) {
+  return DEVICE_COOKIE_NAMES.has(cookie.name);
 }
 
-async function clearSoundCloudCookies() {
-  const cookies = await API.cookies.getAll({ domain: "soundcloud.com" });
+// Firefox only: the cookie store a tab uses. Tabs in Multi-Account Containers
+// (and private windows) have their own cookie jar, so switching accounts must
+// read and write that jar, not the default one. Chrome tabs have no
+// cookieStoreId, so this is undefined there and the default store is used.
+function storeIdForTab(tab) {
+  return tab?.cookieStoreId || undefined;
+}
+
+async function getAllSoundCloudCookies(storeId) {
+  const query = { domain: "soundcloud.com" };
+  if (storeId) query.storeId = storeId;
+  try {
+    return await API.cookies.getAll(query);
+  } catch (error) {
+    // Firefox with first-party isolation turned on requires firstPartyDomain;
+    // null means "any". Chrome never takes this path.
+    return API.cookies.getAll({ ...query, firstPartyDomain: null });
+  }
+}
+
+async function readSoundCloudCookies(storeId) {
+  const cookies = (await getAllSoundCloudCookies(storeId))
+    .filter((cookie) => !isDeviceCookie(cookie));
+  return cookies.map((cookie) => {
+    const saved = {
+      name: cookie.name,
+      value: cookie.value,
+      domain: cookie.domain,
+      hostOnly: cookie.hostOnly,
+      path: cookie.path,
+      secure: cookie.secure,
+      httpOnly: cookie.httpOnly,
+      sameSite: cookie.sameSite,
+      expirationDate: cookie.expirationDate
+    };
+    // Firefox only; Chrome rejects this field, so only keep it when present.
+    if (typeof cookie.firstPartyDomain === "string") {
+      saved.firstPartyDomain = cookie.firstPartyDomain;
+    }
+    return saved;
+  });
+}
+
+async function clearSoundCloudCookies(storeId) {
+  const cookies = (await getAllSoundCloudCookies(storeId))
+    .filter((cookie) => !isDeviceCookie(cookie));
   await Promise.allSettled(
     cookies.map((cookie) => {
       const host = cookie.domain.startsWith(".")
         ? cookie.domain.slice(1)
         : cookie.domain;
       const protocol = cookie.secure ? "https://" : "http://";
-      return API.cookies.remove({
+      const details = {
         url: `${protocol}${host}${cookie.path}`,
         name: cookie.name,
         storeId: cookie.storeId
-      });
+      };
+      if (typeof cookie.firstPartyDomain === "string") {
+        details.firstPartyDomain = cookie.firstPartyDomain;
+      }
+      return API.cookies.remove(details);
     })
   );
 }
 
-function normalizeSameSite(sameSite, secure) {
-  if (!sameSite) return null;
-  const normalized = String(sameSite).toLowerCase();
-  if (normalized.includes("strict")) return "strict";
-  if (normalized.includes("lax")) return "lax";
-  if (normalized.includes("none") || normalized.includes("no_restriction")) {
-    return secure ? "no_restriction" : null;
-  }
-  return null;
+function normalizeSameSite(sameSite) {
+  const normalized = String(sameSite || "").toLowerCase();
+  // Check no_restriction first: the string "no_restriction" contains "strict".
+  if (normalized === "no_restriction" || normalized === "none") return "no_restriction";
+  if (normalized === "strict") return "strict";
+  if (normalized === "lax") return "lax";
+  return "unspecified";
 }
 
-async function applySoundCloudCookies(cookies) {
+// Chrome reports host-only cookies with a bare domain ("soundcloud.com") and
+// domain cookies with a leading dot (".soundcloud.com"). Older saved accounts
+// don't have the hostOnly flag, so fall back to that rule.
+function isHostOnly(cookie) {
+  if (typeof cookie.hostOnly === "boolean") return cookie.hostOnly;
+  return !String(cookie.domain || "").startsWith(".");
+}
+
+async function applySoundCloudCookies(cookies, storeId) {
+  const nowSeconds = Date.now() / 1000;
+  const seen = new Set();
+
+  const toApply = cookies.filter((cookie) => {
+    // Accounts saved by older versions still contain these; skip them.
+    if (isDeviceCookie(cookie)) return false;
+    // Expired cookies can't be restored; setting them only deletes things.
+    if (typeof cookie.expirationDate === "number" && cookie.expirationDate <= nowSeconds) {
+      return false;
+    }
+    const key = `${cookie.name}|${cookie.domain}|${cookie.path}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
   await Promise.allSettled(
-    cookies.map((cookie) => {
+    toApply.map((cookie) => {
       const host = cookie.domain.startsWith(".")
         ? cookie.domain.slice(1)
         : cookie.domain;
@@ -77,7 +151,11 @@ async function applySoundCloudCookies(cookies) {
         httpOnly: cookie.httpOnly
       };
 
-      if (cookie.domain) {
+      // IMPORTANT: passing `domain` turns a host-only cookie into a domain
+      // cookie. SoundCloud then can't overwrite or delete it on sign-in or
+      // sign-out, so a stale session cookie sits next to the real one and
+      // causes the login/logout loop. Only set `domain` for real domain cookies.
+      if (!isHostOnly(cookie)) {
         details.domain = cookie.domain;
       }
 
@@ -85,18 +163,33 @@ async function applySoundCloudCookies(cookies) {
         details.expirationDate = cookie.expirationDate;
       }
 
-      if (cookie.firstPartyDomain) {
+      if (storeId) {
+        details.storeId = storeId;
+      }
+
+      // Firefox only (first-party isolation). Accounts saved in Chrome or by
+      // older versions don't have it, and Chrome rejects the field.
+      if (typeof cookie.firstPartyDomain === "string" && IS_FIREFOX) {
         details.firstPartyDomain = cookie.firstPartyDomain;
       }
 
-      const sameSite = normalizeSameSite(cookie.sameSite, cookie.secure);
-      if (sameSite) details.sameSite = sameSite;
+      // Firefox doesn't accept "unspecified" (it treats a missing SameSite as
+      // None), so leaving the field out is right in both browsers.
+      const sameSite = normalizeSameSite(cookie.sameSite);
+      // SameSite=None requires Secure; otherwise the set call is rejected.
+      if (sameSite !== "unspecified" && !(sameSite === "no_restriction" && !cookie.secure)) {
+        details.sameSite = sameSite;
+      }
 
       return API.cookies.set(details);
     })
   );
 }
 
+// --- Switch verification (from 0.1.6) ---------------------------------------
+// After a switch, the reloaded page checks it's signed in as the account we
+// switched to. If it isn't (e.g. that account's saved session expired), the
+// previous session is put back so you're never left signed out.
 async function getPendingVerify() {
   const data = await API.storage.local.get(PENDING_VERIFY_KEY);
   return data[PENDING_VERIFY_KEY] || null;
@@ -107,8 +200,10 @@ async function setPendingVerify(payload) {
 }
 
 async function rollbackSwitch(tab, fallback) {
-  await clearSoundCloudCookies();
-  await applySoundCloudCookies(fallback?.cookies || []);
+  const storeId = fallback?.storeId || storeIdForTab(tab);
+  await clearSoundCloudCookies(storeId);
+  await applySoundCloudCookies(fallback?.cookies || [], storeId);
+  await setActiveAccountId(fallback?.activeAccountId || null);
   if (tab?.id) {
     await sendMessageToTab(tab.id, {
       type: "APPLY_LOCAL_STORAGE",
@@ -139,8 +234,11 @@ async function createOrUpdateAccount(profile) {
   const accounts = await getAccounts();
   const now = Date.now();
   const existingIndex = accounts.findIndex((a) => a.username === profile.username);
+  const existingId = existingIndex >= 0 ? accounts[existingIndex].id : null;
   const account = {
-    id: profile.id || `${profile.username}-${now}`,
+    // Keep the existing id when re-saving, otherwise menu items and the
+    // active-account marker point at an id that no longer exists.
+    id: existingId || profile.id || `${profile.username}-${now}`,
     username: profile.username,
     displayName: profile.displayName || profile.username,
     profileUrl: profile.profileUrl || `${SC_URL}/${profile.username}`,
@@ -159,11 +257,64 @@ async function createOrUpdateAccount(profile) {
   return account;
 }
 
-const pendingLogins = new Map();
+// The MV3 service worker is shut down after ~30s idle, so anything kept in a
+// plain variable (like the old pendingLogins Map) is lost. Use storage instead.
+const PENDING_KEY = "scam_pending_logins";
+const ACTIVE_KEY = "scam_active_account_id";
+const sessionStore = API.storage.session || API.storage.local;
+
+async function getPendingLogins() {
+  const data = await sessionStore.get(PENDING_KEY);
+  const pending = data[PENDING_KEY] || {};
+  const now = Date.now();
+  for (const [tabId, expiresAt] of Object.entries(pending)) {
+    if (expiresAt <= now) delete pending[tabId];
+  }
+  return pending;
+}
+
+async function setPendingLogin(tabId, active) {
+  const pending = await getPendingLogins();
+  if (active) {
+    pending[tabId] = Date.now() + 10 * 60 * 1000;
+  } else {
+    delete pending[tabId];
+  }
+  await sessionStore.set({ [PENDING_KEY]: pending });
+}
+
+async function getActiveAccountId() {
+  const data = await API.storage.local.get(ACTIVE_KEY);
+  return data[ACTIVE_KEY] || null;
+}
+
+async function setActiveAccountId(id) {
+  await API.storage.local.set({ [ACTIVE_KEY]: id || null });
+}
+
+// SoundCloud rotates its session cookies while you use it. Before switching
+// away, store the fresh cookies for the account that is signed in now, so its
+// saved copy doesn't go stale. Only do it when the page's username matches the
+// account we last switched to, so cookies never land on the wrong account.
+async function refreshActiveAccount(tab) {
+  const tabId = tab?.id;
+  const activeId = await getActiveAccountId();
+  if (!activeId || !tabId) return;
+  const accounts = await getAccounts();
+  const active = accounts.find((a) => a.id === activeId);
+  if (!active) return;
+  const profile = await sendMessageToTab(tabId, { type: "EXTRACT_SC_PROFILE" });
+  if (!profile?.ok || profile.username !== active.username) return;
+  const cookies = await readSoundCloudCookies(storeIdForTab(tab));
+  await createOrUpdateAccount({ ...profile, id: active.id, cookies });
+}
+
+API.tabs.onRemoved.addListener((tabId) => {
+  setPendingLogin(tabId, false).catch(() => {});
+});
 
 API.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status !== "complete") return;
-  if (!pendingLogins.has(tabId)) return;
 
   const url = tab.url || "";
   if (!url.includes("soundcloud.com")) return;
@@ -174,16 +325,19 @@ API.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     url.includes("/password")
   ) return;
 
-  pendingLogins.delete(tabId);
-
   (async () => {
+    const pending = await getPendingLogins();
+    if (!pending[tabId]) return;
+    await setPendingLogin(tabId, false);
+
     const delays = [2000, 3000, 5000];
     for (const delay of delays) {
       await new Promise((r) => setTimeout(r, delay));
       const profile = await sendMessageToTab(tabId, { type: "EXTRACT_SC_PROFILE" });
       if (profile?.ok && profile.username) {
-        const newCookies = await readSoundCloudCookies();
-        await createOrUpdateAccount({ ...profile, cookies: newCookies });
+        const newCookies = await readSoundCloudCookies(storeIdForTab(tab));
+        const saved = await createOrUpdateAccount({ ...profile, cookies: newCookies });
+        await setActiveAccountId(saved.id);
         return;
       }
     }
@@ -205,7 +359,8 @@ API.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
 
-      const originalCookies = await readSoundCloudCookies();
+      const storeId = storeIdForTab(callerTab);
+      const originalCookies = await readSoundCloudCookies(storeId);
       const currentProfile = await sendMessageToTab(callerTab.id, {
         type: "EXTRACT_SC_PROFILE"
       });
@@ -213,11 +368,10 @@ API.runtime.onMessage.addListener((message, sender, sendResponse) => {
         await createOrUpdateAccount({ ...currentProfile, cookies: originalCookies });
       }
 
-      await clearSoundCloudCookies();
+      await clearSoundCloudCookies(storeId);
+      await setActiveAccountId(null);
+      await setPendingLogin(callerTab.id, true);
       await API.tabs.update(callerTab.id, { url: "https://soundcloud.com/signin" });
-
-      pendingLogins.set(callerTab.id, {});
-      setTimeout(() => pendingLogins.delete(callerTab.id), 10 * 60 * 1000);
 
       sendResponse({ ok: true });
       return;
@@ -236,9 +390,28 @@ API.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
 
-      const cookies = await readSoundCloudCookies();
+      const cookies = await readSoundCloudCookies(storeIdForTab(tab));
       const account = await createOrUpdateAccount({ ...profile, cookies });
+      await setActiveAccountId(account.id);
       sendResponse({ ok: true, account });
+      return;
+    }
+
+    if (message?.type === "UPDATE_ACCOUNT_AVATAR") {
+      // Only updates the picture of an account that's already saved; never
+      // touches cookies or creates accounts.
+      const url = String(message.avatarUrl || "");
+      if (!/^https:\/\/[^/]*sndcdn\.com\//.test(url)) {
+        sendResponse({ ok: false, error: "invalid avatar url." });
+        return;
+      }
+      const accounts = await getAccounts();
+      const account = accounts.find((a) => a.username === message.username);
+      if (account && account.avatarUrl !== url) {
+        account.avatarUrl = url;
+        await setAccounts(accounts);
+      }
+      sendResponse({ ok: true });
       return;
     }
 
@@ -246,6 +419,9 @@ API.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const accounts = await getAccounts();
       const filtered = accounts.filter((a) => a.id !== message.accountId);
       await setAccounts(filtered);
+      if ((await getActiveAccountId()) === message.accountId) {
+        await setActiveAccountId(null);
+      }
       sendResponse({ ok: true });
       return;
     }
@@ -264,25 +440,31 @@ API.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
 
-      const fallbackCookies = await readSoundCloudCookies();
-      const currentProfile = await sendMessageToTab(tab.id, { type: "EXTRACT_SC_PROFILE" });
-      const fallback = {
-        cookies: fallbackCookies,
-        localStorageSnapshot: currentProfile?.localStorageSnapshot || {}
-      };
-      if (currentProfile?.ok && currentProfile.username) {
-        await createOrUpdateAccount({ ...currentProfile, cookies: fallbackCookies });
+      const previousActiveId = await getActiveAccountId();
+      if (previousActiveId !== account.id) {
+        await refreshActiveAccount(tab);
       }
 
+      const storeId = storeIdForTab(tab);
+
+      // Remember the current session so it can be restored if the switch fails.
+      const fallbackCookies = await readSoundCloudCookies(storeId);
+      const currentProfile = await sendMessageToTab(tab.id, { type: "EXTRACT_SC_PROFILE" });
       await setPendingVerify({
         tabId: tab.id,
         expectedUsername: account.username,
-        fallback,
+        fallback: {
+          cookies: fallbackCookies,
+          localStorageSnapshot: currentProfile?.localStorageSnapshot || {},
+          activeAccountId: previousActiveId,
+          storeId
+        },
         timestamp: Date.now()
       });
 
-      await clearSoundCloudCookies();
-      await applySoundCloudCookies(account.cookies || []);
+      await clearSoundCloudCookies(storeId);
+      await applySoundCloudCookies(account.cookies || [], storeId);
+      await setActiveAccountId(account.id);
       await sendMessageToTab(tab.id, {
         type: "APPLY_LOCAL_STORAGE",
         localStorageSnapshot: account.localStorageSnapshot || {}
@@ -319,7 +501,7 @@ API.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return;
       }
       await rollbackSwitch(sender.tab, verify.fallback);
-      sendResponse({ ok: true });
+      sendResponse({ ok: true, rolledBack: true });
       return;
     }
 
